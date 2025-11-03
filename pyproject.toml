@@ -1,0 +1,13 @@
+[project]
+name = "bcm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "altair>=5.5.0",
+    "ipykernel>=7.1.0",
+    "nbconvert>=7.16.6",
+    "nbformat>=5.10.4",
+    "polars>=1.35.1",
+]
