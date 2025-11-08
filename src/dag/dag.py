@@ -5,221 +5,248 @@ from collections import defaultdict, deque
 from typing import Dict, Set, Iterable, Hashable, Optional, Any, List, Tuple
 
 
-# ---------- Exceptions ----------
-class CycleError(Exception): ...
-class NodeNotFoundError(KeyError): ...
-class EdgeExistsError(ValueError): ...
-class EdgeNotFoundError(KeyError): ...
-
-
-# ---------- Optional structured metadata ----------
-@dataclass(slots=True)
-class NodeAttr:
-    kind: Optional[str] = None      # e.g. "observed" | "latent" | "intervention"
-    label: Optional[str] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass(slots=True)
-class EdgeAttr:
-    label: Optional[str] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-
-# ---------- Core DAG (mutable) ----------
-class DAG:
+class DirectedAcyclicGraph:
     def __init__(self):
         self._nodes: Set[Hashable] = set()
+        self._edges: Set[Hashable] = set()
         self._parents: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._children: Dict[Hashable, Set[Hashable]] = defaultdict(set)
-        self._node_attr: Dict[Hashable, NodeAttr] = {}
-        self._edge_attr: Dict[Tuple[Hashable, Hashable], EdgeAttr] = {}
+        self._graph: SignedTriangularAdjacencyMatrix = SignedTriangularAdjacencyMatrix(0)
 
-    # --- Node ops ---
-    def add_node(self, node: Hashable, attr: Optional[NodeAttr] = None) -> None:
+    def add_node(self, node: Hashable) -> None:
         self._nodes.add(node)
-        if attr is not None:
-            self._node_attr[node] = attr
 
-    def remove_node(self, node: Hashable) -> None:
-        if node not in self._nodes:
-            raise NodeNotFoundError(node)
-        # remove incident edges
-        for p in list(self._parents[node]): self.remove_edge(p, node)
-        for c in list(self._children[node]): self.remove_edge(node, c)
-        self._nodes.remove(node)
-        self._node_attr.pop(node, None)
+    def add_edge(self, from_node: Hashable, to_node: Hashable) -> None:
+        if from_node not in self._nodes or to_node not in self._nodes:
+            raise ValueError("Both nodes must be added to the graph before adding an edge.")
+        if self._creates_cycle(from_node, to_node):
+            raise ValueError("Adding this edge would create a cycle.")
+        self._edges.add((from_node, to_node))
+        self._parents[to_node].add(from_node)
+        self._children[from_node].add(to_node)
+    
+    def _creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
+        visited = set()
+        queue = deque([to_node])
+        while queue:
+            current = queue.popleft()
+            if current == from_node:
+                return True
+            for parent in self._parents[current]:
+                if parent not in visited:
+                    visited.add(parent)
+                    queue.append(parent)
+        return False
 
-    # --- Edge ops ---
-    def add_edge(self, parent: Hashable, child: Hashable, attr: Optional[EdgeAttr] = None) -> None:
-        # auto-add nodes
-        if parent not in self._nodes: self.add_node(parent)
-        if child not in self._nodes: self.add_node(child)
+    @staticmethod
+    def _hi_lo(u: int, v: int) -> Tuple[int, int]:
+        if u == v:
+            raise ValueError("Self-loops are not allowed in a DAG.")
+        return (u, v) if u > v else (v, u)
 
-        if child in self._children[parent]:
-            raise EdgeExistsError((parent, child))
+    def _get_cell(self, u: int, v: int) -> Tuple[int, int, int]:
+        """Return (i, j, val) where i>j, val is stored signed integer."""
+        i, j = self._hi_lo(u, v)
+        return i, j, self._M[i][j]
 
-        # tentatively add, then cycle-check
-        self._parents[child].add(parent)
-        self._children[parent].add(child)
-        if not self.is_acyclic():
-            # rollback
-            self._parents[child].remove(parent)
-            self._children[parent].remove(child)
-            raise CycleError(f"Adding {parent}->{child} creates a cycle")
+    def clear_edge(self, u: int, v: int) -> None:
+        i, j = self._hi_lo(u, v)
+        self._M[i][j] = 0
 
-        if attr is not None:
-            self._edge_attr[(parent, child)] = attr
+    def set_edge(self, u: int, v: int, weight: int = 1) -> None:
+        """
+        Create/overwrite a directed edge u -> v with (positive) weight.
+        """
+        if weight <= 0:
+            raise ValueError("Weight must be a positive integer.")
+        i, j = self._hi_lo(u, v)
+        # + means j -> i; - means i -> j
+        self._M[i][j] = weight if (j == u and i == v) else -weight
 
-    def remove_edge(self, parent: Hashable, child: Hashable) -> None:
-        if child not in self._children.get(parent, set()):
-            raise EdgeNotFoundError((parent, child))
-        self._children[parent].remove(child)
-        self._parents[child].remove(parent)
-        self._edge_attr.pop((parent, child), None)
+    def add_edge(self, u: int, v: int, weight: int = 1) -> None:
+        """Alias of set_edge; overwrite if present."""
+        self.set_edge(u, v, weight)
 
-    # --- Queries ---
-    @property
-    def nodes(self) -> Set[Hashable]:
-        return set(self._nodes)
+    def has_edge(self, u: int, v: int) -> bool:
+        i, j, val = self._get_cell(u, v)
+        if val == 0:
+            return False
+        # decode direction
+        if (u < v and val > 0) or (u > v and val < 0):
+            return True  # u -> v encoded
+        return False
 
-    def parents(self, node: Hashable) -> Set[Hashable]:
-        if node not in self._nodes: raise NodeNotFoundError(node)
-        return set(self._parents[node])
+    def weight(self, u: int, v: int) -> Optional[int]:
+        """Return weight for edge u->v, or None if absent."""
+        i, j, val = self._get_cell(u, v)
+        if val == 0:
+            return None
+        # u -> v iff:
+        if (u < v and val > 0) or (u > v and val < 0):
+            return abs(val)
+        return None
 
-    def children(self, node: Hashable) -> Set[Hashable]:
-        if node not in self._nodes: raise NodeNotFoundError(node)
-        return set(self._children[node])
+    def children(self, u: int) -> Iterator[int]:
+        """Successors of u."""
+        # case A: edges u -> v where v > u (stored at (v,u) with +)
+        for v in range(u + 1, self.n):
+            val = self._M[v][u]
+            if val > 0:  # j->i encoded and j==u
+                yield v
+        # case B: edges u -> v where v < u (stored at (u,v) with -)
+        row = self._M[u]
+        for v in range(u):
+            if row[v] < 0:
+                yield v
 
-    def has_edge(self, u: Hashable, v: Hashable) -> bool:
-        return v in self._children.get(u, set())
+    def parents(self, u: int) -> Iterator[int]:
+        """Predecessors of u."""
+        # case A: edges v -> u where v < u (stored at (u,v) with +)
+        row = self._M[u]
+        for v in range(u):
+            if row[v] > 0:
+                yield v
+        # case B: edges v -> u where v > u (stored at (v,u) with -)
+        for v in range(u + 1, self.n):
+            val = self._M[v][u]
+            if val < 0:
+                yield v
 
-    # --- Attributes ---
-    def get_node_attr(self, node: Hashable) -> NodeAttr:
-        if node not in self._nodes: raise NodeNotFoundError(node)
-        return self._node_attr.get(node, NodeAttr())
-
-    def set_node_attr(self, node: Hashable, **kwargs) -> None:
-        cur = self.get_node_attr(node)
-        for k, v in kwargs.items():
-            setattr(cur, k, v)
-        self._node_attr[node] = cur
-
-    def get_edge_attr(self, parent: Hashable, child: Hashable) -> EdgeAttr:
-        if not self.has_edge(parent, child): raise EdgeNotFoundError((parent, child))
-        return self._edge_attr.get((parent, child), EdgeAttr())
-
-    def set_edge_attr(self, parent: Hashable, child: Hashable, **kwargs) -> None:
-        cur = self.get_edge_attr(parent, child)
-        for k, v in kwargs.items():
-            setattr(cur, k, v)
-        self._edge_attr[(parent, child)] = cur
-
-    # --- Algorithms ---
-    def is_acyclic(self) -> bool:
-        indeg = {n: len(self._parents[n]) for n in self._nodes}
-        q = deque([n for n in self._nodes if indeg[n] == 0])
-        seen = 0
-        while q:
-            u = q.popleft(); seen += 1
-            for v in self._children[u]:
-                indeg[v] -= 1
-                if indeg[v] == 0: q.append(v)
-        return seen == len(self._nodes)
-
-    def topo_order(self) -> List[Hashable]:
-        indeg = {n: len(self._parents[n]) for n in self._nodes}
-        q = deque([n for n in self._nodes if indeg[n] == 0])
-        order: List[Hashable] = []
-        while q:
-            u = q.popleft()
-            order.append(u)
-            for v in self._children[u]:
-                indeg[v] -= 1
-                if indeg[v] == 0: q.append(v)
-        if len(order) != len(self._nodes):
-            raise CycleError("Graph is not acyclic.")
-        return order
-
-    # --- Serialisation (structure + light metadata only) ---
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "nodes": [
-                {"id": n, "attr": self._node_attr.get(n, NodeAttr()).__dict__}
-                for n in sorted(self._nodes, key=str)
-            ],
-            "edges": [
-                {"u": u, "v": v, "attr": self._edge_attr.get((u, v), EdgeAttr()).__dict__}
-                for u in self._nodes for v in self._children[u]
-            ],
-        }
+    def edges(self) -> Iterator[Tuple[int, int, int]]:
+        """Iterate (u, v, weight) for all directed edges."""
+        for i in range(1, self.n):
+            row = self._M[i]
+            for j in range(i):
+                val = row[j]
+                if val == 0:
+                    continue
+                if val > 0:  # j -> i
+                    yield (j, i, val)
+                else:        # i -> j
+                    yield (i, j, -val)
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "DAG":
-        dag = cls()
-        for n in payload.get("nodes", []):
-            dag.add_node(n["id"], NodeAttr(**n.get("attr", {})))
-        for e in payload.get("edges", []):
-            dag.add_edge(e["u"], e["v"], EdgeAttr(**e.get("attr", {})))
-        return dag
+    def from_edges(cls, n: int, edges: Iterable[Tuple[int, int, int | None]]):
+        g = cls(n)
+        for u, v, *w in edges:
+            wgt = 1 if not w or w[0] is None else int(w[0])
+            g.add_edge(u, v, wgt)
+        return g
 
-    # --- Views ---
-    def freeze(self) -> "FrozenDAG":
-        return FrozenDAG(self)
+    def to_adjacency_list(self) -> List[List[Tuple[int, int]]]:
+        """List-of-lists adjacency with (child, weight)."""
+        adj = [[] for _ in range(self.n)]
+        for u, v, w in self.edges():
+            adj[u].append((v, w))
+        return adj
+    
 
-    def subdag(self, nodes: Iterable[Hashable]) -> "SubDAG":
-        return SubDAG(self, set(nodes))
-
-
-# ---------- Read-only snapshot ----------
-class FrozenDAG:
-    def __init__(self, dag: DAG):
-        self._nodes = frozenset(dag.nodes)
-        self._edges = frozenset((u, v) for u in dag.nodes for v in dag.children(u))
-        self._topo = tuple(dag.topo_order())
-
-    @property
-    def nodes(self) -> Set[Hashable]:
-        return set(self._nodes)
-
-    @property
-    def edges(self) -> Set[Tuple[Hashable, Hashable]]:
-        return set(self._edges)
-
-    def topo_order(self) -> List[Hashable]:
-        return list(self._topo)
-
-
-# ---------- Read-only view on a subset ----------
-class SubDAG:
-    def __init__(self, base: DAG, keep: Set[Hashable]):
-        missing = keep.difference(base.nodes)
-        if missing:
-            raise NodeNotFoundError(f"Unknown nodes in subdag: {missing}")
-        self._base = base
-        self._keep = set(keep)
-
-    @property
-    def nodes(self) -> Set[Hashable]:
-        return set(self._keep)
-
-    def children(self, node: Hashable) -> Set[Hashable]:
-        return {c for c in self._base.children(node) if c in self._keep}
-
-    def parents(self, node: Hashable) -> Set[Hashable]:
-        return {p for p in self._base.parents(node) if p in self._keep}
-
-    def topo_order(self) -> List[Hashable]:
-        # simple Kahn on the induced subgraph
-        indeg = {n: len(self.parents(n)) for n in self._keep}
-        from collections import deque
-        q = deque([n for n, d in indeg.items() if d == 0])
-        order = []
-        while q:
-            u = q.popleft()
-            order.append(u)
+    def is_acyclic(self) -> bool:
+        """Kahn’s algorithm (O(n + m))."""
+        indeg = [0] * self.n
+        for _, v, _ in self.edges():
+            indeg[v] += 1
+        stack = [i for i, d in enumerate(indeg) if d == 0]
+        seen = 0
+        while stack:
+            u = stack.pop()
+            seen += 1
             for v in self.children(u):
                 indeg[v] -= 1
-                if indeg[v] == 0: q.append(v)
-        if len(order) != len(self._keep):
-            raise CycleError("Subgraph is not acyclic.")
-        return order
+                if indeg[v] == 0:
+                    stack.append(v)
+        return seen == self.n
+
+
+from typing import List
+
+class SignedTriangularAdjacencyMatrix:
+    """
+    Signed triangular adjacency for a directed acyclic graph on nodes {0..n-1}.
+    Positive weights (+k) encode edges i -> j (where i > j),
+    Negative weights (-k) encode edges j -> i (where i > j).
+    Entries exist only for i > j.
+    """
+
+    def __init__(self, n: int):
+        self.n = int(n)
+        # Lower-triangular dense storage: row i has length i (columns 0..i-1)
+        self._M: List[List[int]] = [[0 for _ in range(i)] for i in range(self.n)]
+
+    def set_edge(self, i: int, j: int, weight: int = 1, direction: str = "i_to_j") -> None:
+        """
+        Set a directed edge between nodes i and j with given weight.
+        direction = "i_to_j" means i -> j
+        direction = "j_to_i" means j -> i
+        """
+        if i == j:
+            raise ValueError("Self-loops are not allowed in a DAG.")
+        if weight <= 0:
+            raise ValueError("Weight must be a positive integer.")
+
+        hi, lo = (i, j) if i > j else (j, i)
+        if direction == "i_to_j":
+            self._M[hi][lo] = weight if i > j else -weight
+        elif direction == "j_to_i":
+            self._M[hi][lo] = -weight if i > j else weight
+        else:
+            raise ValueError("direction must be 'i_to_j' or 'j_to_i'.")
+
+    def get_edge(self, i: int, j: int) -> int:
+        """Return the signed weight between nodes i and j, or 0 if none."""
+        if i == j:
+            return 0
+        hi, lo = (i, j) if i > j else (j, i)
+        return self._M[hi][lo] if i > j else -self._M[hi][lo]
+
+    def display(self) -> None:
+        """Print the matrix in a readable lower-triangular form."""
+        for i in range(self.n):
+            row = []
+            for j in range(self.n):
+                if i > j:
+                    row.append(f"{self._M[i][j]:>3}")
+                elif i == j:
+                    row.append("  ·")  # diagonal placeholder
+                else:
+                    row.append("   ")  # upper empty
+            print("".join(row))
+        print()
+
+    def __repr__(self) -> str:
+        """Return a string representation of the matrix."""
+        lines = []
+        for i in range(self.n):
+            row = []
+            for j in range(self.n):
+                if i > j:
+                    row.append(f"{self._M[i][j]:>3}")
+                elif i == j:
+                    row.append("  ·")
+                else:
+                    row.append("   ")
+            lines.append("".join(row))
+        return "\n".join(lines)
+
+
+    def to_dense(self) -> List[List[int]]:
+        """Return a full n×n matrix (with mirrored signed values)."""
+        dense = [[0] * self.n for _ in range(self.n)]
+        for i in range(1, self.n):
+            for j in range(i):
+                val = self._M[i][j]
+                dense[i][j] = val
+                dense[j][i] = -val
+        return dense
+
+    
+# Allow alias for easier usage
+DAG = DirectedAcyclicGraph
+STAM = SignedTriangularAdjacencyMatrix
+
+__all__ = ["DirectedAcyclicGraph", "DAG", "STAM", "SignedTriangularAdjacencyMatrix"]
+
+
+if __name__ == "__main__":
+    dag = DAG()
+
