@@ -20,23 +20,43 @@ class DirectedAcyclicGraph:
 
     def from_edges(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> None:
 
-        self._nodes = self._get_all_nodes(edges)                                    # Get the nodes from the edges
-        self._nodes_dict = {node: idx for idx, node in enumerate(self._nodes)}      # Map nodes to indices
+        print(" > Initialising DAG from edges...")
+
+        self._nodes = self._get_nodes_from_edges(edges)                                    # Get the nodes from the edges
+        self._nodes_dict = {node: idx for idx, node in enumerate(self.get_nodes())}      # Map nodes to indices
         self._graph = SignedTriangularAdjacencyMatrix(len(self._nodes))             # Initialize the adjacency matrix
 
         # Build edges
         for u, v in edges:
+            print(f"Building edge: {u} -> {v}")
             self.add_edge(u, v)
 
 
-    def _get_all_nodes(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> Set[Hashable]:
+    def _get_nodes_from_edges(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> Set[Hashable]:
         nodes = set()
         for u, v in edges:
             nodes.add(u)
             nodes.add(v)
 
-        print(f"\nNodes identified in graph: {nodes}")
         return nodes
+    
+
+    def get_nodes(self, srt_method: str = "str_sort") -> List[Hashable]:
+        """Return all nodes sorted according to the specified method.
+
+        Parameters:
+        srt_method : str, optional
+            Sorting method. Options:
+            - "str_sort": Sort alphabetically using string order (default)
+            - "topo_sort": Topological sort (via _topologic_sort)
+        """
+        
+        if srt_method == "str_sort":
+            return sorted(self._nodes, key=str)
+        elif srt_method == "topo_sort":
+            return self._topologic_sort()
+        else:
+            raise ValueError(f"Unknown sort method: {srt_method}")
 
     
     def add_node(self, node: Hashable) -> None:
@@ -50,22 +70,48 @@ class DirectedAcyclicGraph:
             raise ValueError("Adding this edge would create a cycle.")
                
         self._edges.add((self._nodes_dict[from_node], self._nodes_dict[to_node]))
-        self._parents[to_node].add(from_node)
-        self._children[from_node].add(to_node)
+        self._parents[self._nodes_dict[to_node]].add(self._nodes_dict[from_node])
+        self._children[self._nodes_dict[from_node]].add(self._nodes_dict[to_node])
+        print(f" > Adding edge in matrix: {from_node}={self._nodes_dict[from_node]} -> {to_node}={self._nodes_dict[to_node]}")
         self._graph.set_edge(self._nodes_dict[from_node], self._nodes_dict[to_node], weight=1)
     
 
-    def _creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
+    def test_creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
         visited = set()
-        queue = deque([to_node])
+        queue = deque([self._nodes_dict[to_node]])
         while queue:
             current = queue.popleft()
-            if current == from_node:
+            if current == self._nodes_dict[from_node]:
                 return True
             for parent in self._parents[current]:
                 if parent not in visited:
                     visited.add(parent)
                     queue.append(parent)
+        return False
+    
+
+    def _creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
+        """Return True if adding (from_node -> to_node) would create a cycle."""
+        try:
+            u = self._nodes_dict[from_node]  # index of from_node
+            v = self._nodes_dict[to_node]    # index of to_node
+        except KeyError:
+            raise ValueError("Both nodes must be added to the graph before cycle check.")
+
+        if u == v:  # self-loop
+            return True
+
+        # If there is already a path v -> ... -> u via _children, adding u -> v makes a cycle.
+        seen = set([v])
+        q = deque([v])
+        while q:
+            cur = q.popleft()
+            if cur == u:
+                return True
+            for child in self._children[cur]:   # _children must store **indices**
+                if child not in seen:
+                    seen.add(child)
+                    q.append(child)
         return False
 
 
@@ -204,7 +250,7 @@ class SignedTriangularAdjacencyMatrix:
         self._M: List[List[int]] = [[0 for _ in range(i)] for i in range(self.n)]
 
 
-    def set_edge(self, i: int, j: int, weight: int = 1, direction: str = "i_to_j") -> None:
+    def set_edge(self, i: int, j: int, weight: int = 1) -> None:
         if i == j:
             raise ValueError("Self-loops are not allowed in a DAG.")
         if weight <= 0:
@@ -212,12 +258,12 @@ class SignedTriangularAdjacencyMatrix:
 
         hi, lo = (i, j) if i > j else (j, i)
 
-        if direction not in ("i_to_j", "j_to_i"):
-            raise ValueError("direction must be 'i_to_j' or 'j_to_i'.")
+        if i < j:
+            weight = - weight  # i → j
 
         # With hi > lo:
         # +k means hi → lo; −k means lo → hi
-        self._M[hi][lo] = weight if direction == "i_to_j" else -weight
+        self._M[hi][lo] = weight
 
 
     def get_edge(self, i: int, j: int) -> int:
