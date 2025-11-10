@@ -2,29 +2,59 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
-from typing import Dict, Set, Iterable, Hashable, Optional, Any, List, Tuple
+from typing import Dict, Set, Iterable, Hashable, Optional, Any, List, Tuple, Iterator
 
 
 class DirectedAcyclicGraph:
-    def __init__(self):
+    def __init__(self, from_edges=None):
         self._nodes: Set[Hashable] = set()
+        self._nodes_dict: Dict[Hashable, int] = dict()
         self._edges: Set[Hashable] = set()
         self._parents: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._children: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._graph: SignedTriangularAdjacencyMatrix = SignedTriangularAdjacencyMatrix(0)
 
+        if from_edges is not None:
+            self.from_edges(from_edges)
+    
+
+    def from_edges(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> None:
+
+        self._nodes = self._get_all_nodes(edges)                                    # Get the nodes from the edges
+        self._nodes_dict = {node: idx for idx, node in enumerate(self._nodes)}      # Map nodes to indices
+        self._graph = SignedTriangularAdjacencyMatrix(len(self._nodes))             # Initialize the adjacency matrix
+
+        # Build edges
+        for u, v in edges:
+            self.add_edge(u, v)
+
+
+    def _get_all_nodes(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> Set[Hashable]:
+        nodes = set()
+        for u, v in edges:
+            nodes.add(u)
+            nodes.add(v)
+
+        print(f"\nNodes identified in graph: {nodes}")
+        return nodes
+
+    
     def add_node(self, node: Hashable) -> None:
         self._nodes.add(node)
+
 
     def add_edge(self, from_node: Hashable, to_node: Hashable) -> None:
         if from_node not in self._nodes or to_node not in self._nodes:
             raise ValueError("Both nodes must be added to the graph before adding an edge.")
         if self._creates_cycle(from_node, to_node):
             raise ValueError("Adding this edge would create a cycle.")
-        self._edges.add((from_node, to_node))
+               
+        self._edges.add((self._nodes_dict[from_node], self._nodes_dict[to_node]))
         self._parents[to_node].add(from_node)
         self._children[from_node].add(to_node)
+        self._graph.set_edge(self._nodes_dict[from_node], self._nodes_dict[to_node], weight=1)
     
+
     def _creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
         visited = set()
         queue = deque([to_node])
@@ -38,20 +68,24 @@ class DirectedAcyclicGraph:
                     queue.append(parent)
         return False
 
+
     @staticmethod
     def _hi_lo(u: int, v: int) -> Tuple[int, int]:
         if u == v:
             raise ValueError("Self-loops are not allowed in a DAG.")
         return (u, v) if u > v else (v, u)
 
+
     def _get_cell(self, u: int, v: int) -> Tuple[int, int, int]:
         """Return (i, j, val) where i>j, val is stored signed integer."""
         i, j = self._hi_lo(u, v)
         return i, j, self._M[i][j]
 
+
     def clear_edge(self, u: int, v: int) -> None:
         i, j = self._hi_lo(u, v)
-        self._M[i][j] = 0
+        self._graph[i][j] = 0
+
 
     def set_edge(self, u: int, v: int, weight: int = 1) -> None:
         """
@@ -61,11 +95,10 @@ class DirectedAcyclicGraph:
             raise ValueError("Weight must be a positive integer.")
         i, j = self._hi_lo(u, v)
         # + means j -> i; - means i -> j
-        self._M[i][j] = weight if (j == u and i == v) else -weight
+        direction = "i_to_j" if u > v else "j_to_i"
+        self._graph.set_edge(i, j, weight=weight, direction=direction)
 
-    def add_edge(self, u: int, v: int, weight: int = 1) -> None:
-        """Alias of set_edge; overwrite if present."""
-        self.set_edge(u, v, weight)
+
 
     def has_edge(self, u: int, v: int) -> bool:
         i, j, val = self._get_cell(u, v)
@@ -76,6 +109,7 @@ class DirectedAcyclicGraph:
             return True  # u -> v encoded
         return False
 
+
     def weight(self, u: int, v: int) -> Optional[int]:
         """Return weight for edge u->v, or None if absent."""
         i, j, val = self._get_cell(u, v)
@@ -85,6 +119,7 @@ class DirectedAcyclicGraph:
         if (u < v and val > 0) or (u > v and val < 0):
             return abs(val)
         return None
+
 
     def children(self, u: int) -> Iterator[int]:
         """Successors of u."""
@@ -99,6 +134,7 @@ class DirectedAcyclicGraph:
             if row[v] < 0:
                 yield v
 
+
     def parents(self, u: int) -> Iterator[int]:
         """Predecessors of u."""
         # case A: edges v -> u where v < u (stored at (u,v) with +)
@@ -111,6 +147,7 @@ class DirectedAcyclicGraph:
             val = self._M[v][u]
             if val < 0:
                 yield v
+
 
     def edges(self) -> Iterator[Tuple[int, int, int]]:
         """Iterate (u, v, weight) for all directed edges."""
@@ -125,13 +162,8 @@ class DirectedAcyclicGraph:
                 else:        # i -> j
                     yield (i, j, -val)
 
-    @classmethod
-    def from_edges(cls, n: int, edges: Iterable[Tuple[int, int, int | None]]):
-        g = cls(n)
-        for u, v, *w in edges:
-            wgt = 1 if not w or w[0] is None else int(w[0])
-            g.add_edge(u, v, wgt)
-        return g
+
+
 
     def to_adjacency_list(self) -> List[List[Tuple[int, int]]]:
         """List-of-lists adjacency with (child, weight)."""
@@ -158,8 +190,6 @@ class DirectedAcyclicGraph:
         return seen == self.n
 
 
-from typing import List
-
 class SignedTriangularAdjacencyMatrix:
     """
     Signed triangular adjacency for a directed acyclic graph on nodes {0..n-1}.
@@ -173,24 +203,22 @@ class SignedTriangularAdjacencyMatrix:
         # Lower-triangular dense storage: row i has length i (columns 0..i-1)
         self._M: List[List[int]] = [[0 for _ in range(i)] for i in range(self.n)]
 
+
     def set_edge(self, i: int, j: int, weight: int = 1, direction: str = "i_to_j") -> None:
-        """
-        Set a directed edge between nodes i and j with given weight.
-        direction = "i_to_j" means i -> j
-        direction = "j_to_i" means j -> i
-        """
         if i == j:
             raise ValueError("Self-loops are not allowed in a DAG.")
         if weight <= 0:
             raise ValueError("Weight must be a positive integer.")
 
         hi, lo = (i, j) if i > j else (j, i)
-        if direction == "i_to_j":
-            self._M[hi][lo] = weight if i > j else -weight
-        elif direction == "j_to_i":
-            self._M[hi][lo] = -weight if i > j else weight
-        else:
+
+        if direction not in ("i_to_j", "j_to_i"):
             raise ValueError("direction must be 'i_to_j' or 'j_to_i'.")
+
+        # With hi > lo:
+        # +k means hi → lo; −k means lo → hi
+        self._M[hi][lo] = weight if direction == "i_to_j" else -weight
+
 
     def get_edge(self, i: int, j: int) -> int:
         """Return the signed weight between nodes i and j, or 0 if none."""
@@ -198,6 +226,7 @@ class SignedTriangularAdjacencyMatrix:
             return 0
         hi, lo = (i, j) if i > j else (j, i)
         return self._M[hi][lo] if i > j else -self._M[hi][lo]
+
 
     def display(self) -> None:
         """Print the matrix in a readable lower-triangular form."""
@@ -212,6 +241,7 @@ class SignedTriangularAdjacencyMatrix:
                     row.append("   ")  # upper empty
             print("".join(row))
         print()
+
 
     def __repr__(self) -> str:
         """Return a string representation of the matrix."""
@@ -245,7 +275,6 @@ DAG = DirectedAcyclicGraph
 STAM = SignedTriangularAdjacencyMatrix
 
 __all__ = ["DirectedAcyclicGraph", "DAG", "STAM", "SignedTriangularAdjacencyMatrix"]
-
 
 if __name__ == "__main__":
     dag = DAG()
