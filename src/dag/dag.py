@@ -6,6 +6,12 @@ from typing import Dict, Set, Iterable, Hashable, Optional, Any, List, Tuple, It
 
 
 class DirectedAcyclicGraph:
+    """
+    Directed Acyclic Graph (DAG) implementation using a signed triangular adjacency matrix (STAM).
+    Nodes can be any hashable type. Edges are directed and weighted with positive integers.
+    These DAGs are the corner stone building block of Causal Models, and can be used to represent
+    causal relationships between variables, build Causal Bayesian Networks, Structural Causal Models, 
+    and perform causal inference."""
     def __init__(self, from_edges=None):
         self._nodes: Set[Hashable] = set()
         self._nodes_dict: Dict[Hashable, int] = dict()
@@ -165,6 +171,23 @@ class DirectedAcyclicGraph:
         # Return original node labels in topo order
         return [idx_to_node[i] for i in order_indices]
 
+
+    def markov_blanket(self, node: Hashable) -> Set[Hashable]:
+        """Return the Markov blanket of the given node."""
+        if node not in self._nodes_dict:
+            raise ValueError("Node not found in the graph.")
+
+        idx = self._nodes_dict[node]
+        blanket_indices = set()
+
+        # Add genology relations to blanket
+        blanket_indices.update(self._parents[idx])
+        blanket_indices.update(self._children[idx])
+        blanket_indices.update(self._coparents[idx])
+
+        # Map back to original node labels
+        return {list(self._nodes_dict.keys())[list(self._nodes_dict.values()).index(i)] for i in blanket_indices}
+    
 
     @staticmethod
     def _hi_lo(u: int, v: int) -> Tuple[int, int]:
