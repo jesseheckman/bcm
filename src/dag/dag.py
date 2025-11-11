@@ -14,21 +14,19 @@ class DirectedAcyclicGraph:
         self._coparents: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._children: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._graph: SignedTriangularAdjacencyMatrix = SignedTriangularAdjacencyMatrix(0)
+        self.config: DagConfig = DagConfig()
 
         if from_edges is not None:
             self.from_edges(from_edges)
     
 
     def from_edges(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> None:
-
-        #print(" > Initialising DAG from edges...")
-        self._nodes = self._get_nodes_from_edges(edges)                                    # Get the nodes from the edges
-        self._nodes_dict = {node: idx for idx, node in enumerate(self.get_nodes())}      # Map nodes to indices
-        self._graph = SignedTriangularAdjacencyMatrix(len(self._nodes))             # Initialize the adjacency matrix
+        self._nodes = self._get_nodes_from_edges(edges)                                                         # Get the nodes from the edges
+        self._nodes_dict = {node: idx for idx, node in enumerate(self.get_nodes(srt_method="str_sort"))}        # Map nodes to indices alphabetically
+        self._graph = SignedTriangularAdjacencyMatrix(len(self._nodes))                                         # Initialize the STAM
 
         # Build edges
         for u, v in edges:
-            #print(f"Building edge: {u} -> {v}")
             self.add_edge(u, v)
 
 
@@ -41,19 +39,23 @@ class DirectedAcyclicGraph:
         return nodes
     
 
-    def get_nodes(self, srt_method: str = "str_sort") -> List[Hashable]:
+    def get_nodes(self, srt_method: Optional[str] = None) -> List[Hashable]:
         """Return all nodes sorted according to the specified method.
 
         Parameters:
         srt_method : str, optional
-            Sorting method. Options:
-            - "str_sort": Sort alphabetically using string order (default)
-            - "topo_sort": Topological sort (via _topologic_sort)
         """
         
-        if srt_method == "str_sort":
+        # Default sorting method
+        if srt_method is None:
+            srt_method = getattr(getattr(self, "config", {}), "sort_method", "str_sort")
+
+        print(f" > Getting nodes with sort method: {srt_method}")
+        
+        # Sorting methods
+        if srt_method in ("str_sort", "str", "alphabetical"):
             return sorted(self._nodes, key=str)
-        elif srt_method == "topo_sort":
+        elif srt_method in ("topo", "topo_sort", "topologic_sort", "topological_sort"):
             return self._topologic_sort()
         else:
             raise ValueError(f"Unknown sort method: {srt_method}")
@@ -70,8 +72,6 @@ class DirectedAcyclicGraph:
             raise ValueError("Adding this edge would create a cycle.")
                
         self._edges.add((self._nodes_dict[from_node], self._nodes_dict[to_node]))
-        
-        print(f" > Adding edge in matrix: {from_node}={self._nodes_dict[from_node]} -> {to_node}={self._nodes_dict[to_node]}")
         self._graph.set_edge(self._nodes_dict[from_node], self._nodes_dict[to_node], weight=1)
         self._fill_genology(from_node, to_node)
 
@@ -94,21 +94,6 @@ class DirectedAcyclicGraph:
             self._coparents[u].add(existing_parent)
             self._coparents[existing_parent].add(u)
 
-    
-
-    def test_creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
-        visited = set()
-        queue = deque([self._nodes_dict[to_node]])
-        while queue:
-            current = queue.popleft()
-            if current == self._nodes_dict[from_node]:
-                return True
-            for parent in self._parents[current]:
-                if parent not in visited:
-                    visited.add(parent)
-                    queue.append(parent)
-        return False
-    
 
     def _creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
         """Return True if adding (from_node -> to_node) would create a cycle."""
@@ -128,7 +113,7 @@ class DirectedAcyclicGraph:
             cur = q.popleft()
             if cur == u:
                 return True
-            for child in self._children[cur]:   # _children must store **indices**
+            for child in self._children[cur]:
                 if child not in seen:
                     seen.add(child)
                     q.append(child)
@@ -181,7 +166,6 @@ class DirectedAcyclicGraph:
         return [idx_to_node[i] for i in order_indices]
 
 
-
     @staticmethod
     def _hi_lo(u: int, v: int) -> Tuple[int, int]:
         if u == v:
@@ -212,7 +196,6 @@ class DirectedAcyclicGraph:
         self._graph.set_edge(i, j, weight=weight, direction=direction)
 
 
-
     def has_edge(self, u: int, v: int) -> bool:
         i, j, val = self._get_cell(u, v)
         if val == 0:
@@ -234,34 +217,6 @@ class DirectedAcyclicGraph:
         return None
 
 
-    def children(self, u: int) -> Iterator[int]:
-        """Successors of u."""
-        # case A: edges u -> v where v > u (stored at (v,u) with +)
-        for v in range(u + 1, self.n):
-            val = self._M[v][u]
-            if val > 0:  # j->i encoded and j==u
-                yield v
-        # case B: edges u -> v where v < u (stored at (u,v) with -)
-        row = self._M[u]
-        for v in range(u):
-            if row[v] < 0:
-                yield v
-
-
-    def parents(self, u: int) -> Iterator[int]:
-        """Predecessors of u."""
-        # case A: edges v -> u where v < u (stored at (u,v) with +)
-        row = self._M[u]
-        for v in range(u):
-            if row[v] > 0:
-                yield v
-        # case B: edges v -> u where v > u (stored at (v,u) with -)
-        for v in range(u + 1, self.n):
-            val = self._M[v][u]
-            if val < 0:
-                yield v
-
-
     def edges(self) -> Iterator[Tuple[int, int, int]]:
         """Iterate (u, v, weight) for all directed edges."""
         for i in range(1, self.n):
@@ -274,8 +229,6 @@ class DirectedAcyclicGraph:
                     yield (j, i, val)
                 else:        # i -> j
                     yield (i, j, -val)
-
-
 
 
     def to_adjacency_list(self) -> List[List[Tuple[int, int]]]:
@@ -382,6 +335,13 @@ class SignedTriangularAdjacencyMatrix:
                 dense[i][j] = val
                 dense[j][i] = -val
         return dense
+
+
+class DagConfig:
+    """Configuration settings for DirectedAcyclicGraph."""
+    def __init__(self):
+        self.sort_method: str = "topologic_sort"
+        self.edge_weight: int = 1
 
     
 # Allow alias for easier usage
