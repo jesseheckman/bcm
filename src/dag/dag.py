@@ -11,6 +11,7 @@ class DirectedAcyclicGraph:
         self._nodes_dict: Dict[Hashable, int] = dict()
         self._edges: Set[Hashable] = set()
         self._parents: Dict[Hashable, Set[Hashable]] = defaultdict(set)
+        self._coparents: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._children: Dict[Hashable, Set[Hashable]] = defaultdict(set)
         self._graph: SignedTriangularAdjacencyMatrix = SignedTriangularAdjacencyMatrix(0)
 
@@ -20,15 +21,14 @@ class DirectedAcyclicGraph:
 
     def from_edges(self, edges: Iterable[Tuple[Hashable, Hashable]]) -> None:
 
-        print(" > Initialising DAG from edges...")
-
+        #print(" > Initialising DAG from edges...")
         self._nodes = self._get_nodes_from_edges(edges)                                    # Get the nodes from the edges
         self._nodes_dict = {node: idx for idx, node in enumerate(self.get_nodes())}      # Map nodes to indices
         self._graph = SignedTriangularAdjacencyMatrix(len(self._nodes))             # Initialize the adjacency matrix
 
         # Build edges
         for u, v in edges:
-            print(f"Building edge: {u} -> {v}")
+            #print(f"Building edge: {u} -> {v}")
             self.add_edge(u, v)
 
 
@@ -70,10 +70,30 @@ class DirectedAcyclicGraph:
             raise ValueError("Adding this edge would create a cycle.")
                
         self._edges.add((self._nodes_dict[from_node], self._nodes_dict[to_node]))
-        self._parents[self._nodes_dict[to_node]].add(self._nodes_dict[from_node])
-        self._children[self._nodes_dict[from_node]].add(self._nodes_dict[to_node])
+        
         print(f" > Adding edge in matrix: {from_node}={self._nodes_dict[from_node]} -> {to_node}={self._nodes_dict[to_node]}")
         self._graph.set_edge(self._nodes_dict[from_node], self._nodes_dict[to_node], weight=1)
+        self._fill_genology(from_node, to_node)
+
+
+    def _fill_genology(self, from_node: Hashable, to_node: Hashable) -> None:
+        """Fill in the _parents, _children, and _co_parents dictionaries based on current edges."""
+
+        u = self._nodes_dict[from_node]  # index of from_node
+        v = self._nodes_dict[to_node]    # index of to_node
+
+        # Update parent/child relations
+        self._parents[v].add(u)
+        self._children[u].add(v)
+
+        # Update co-parent relations
+        for existing_parent in self._parents[v]:
+            if existing_parent == u:
+                continue
+            # They share a child, so mark each other as co-parents
+            self._coparents[u].add(existing_parent)
+            self._coparents[existing_parent].add(u)
+
     
 
     def test_creates_cycle(self, from_node: Hashable, to_node: Hashable) -> bool:
@@ -113,6 +133,53 @@ class DirectedAcyclicGraph:
                     seen.add(child)
                     q.append(child)
         return False
+    
+
+    def _topologic_sort(self) -> List[Hashable]:
+        """
+        Kahn's algorithm for topological sorting.
+        Returns the nodes (original hashables) in topological order.
+        Raises ValueError if a cycle is detected.
+        """
+        if not self._nodes:
+            return []
+
+        # Map indices <-> original node labels
+        idx_to_node: Dict[int, Hashable] = {idx: node for node, idx in self._nodes_dict.items()}
+
+        n = len(self._nodes)
+
+        # Compute indegrees from the parent sets (all stored as indices)
+        indeg = [0] * n
+        for v_idx, parents in self._parents.items():
+            indeg[v_idx] = len(parents)
+
+        # Use a heap to obtain deterministic order (alphabetical by node label string)
+        import heapq
+        heap: List[Tuple[str, int]] = []
+        for i in range(n):
+            if indeg[i] == 0:
+                heapq.heappush(heap, (str(idx_to_node[i]), i))
+
+        order_indices: List[int] = []
+
+        while heap:
+            _, u = heapq.heappop(heap)
+            order_indices.append(u)
+
+            # Decrease indegree of children; push those that become zero
+            for v in list(self._children[u]):
+                indeg[v] -= 1
+                if indeg[v] == 0:
+                    heapq.heappush(heap, (str(idx_to_node[v]), v))
+
+        if len(order_indices) != n:
+            # Not all nodes were processed -> cycle present
+            raise ValueError("Graph contains a cycle; topological sort is undefined.")
+
+        # Return original node labels in topo order
+        return [idx_to_node[i] for i in order_indices]
+
 
 
     @staticmethod
@@ -276,6 +343,7 @@ class SignedTriangularAdjacencyMatrix:
 
     def display(self) -> None:
         """Print the matrix in a readable lower-triangular form."""
+        print("\n")
         for i in range(self.n):
             row = []
             for j in range(self.n):
